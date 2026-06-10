@@ -386,17 +386,20 @@ async def chat(req: ChatRequest):
         raise HTTPException(404, f"Patient {req.pid} not found")
     if not GEMINI_API_KEY:
         async def no_key():
-            yield f"data: {json.dumps({'error': 'GEMINI_API_KEY not set.'})}
-
-"
+            msg = json.dumps({"error": "GEMINI_API_KEY not set."})
+            yield "data: " + msg + "\n\n"
         return StreamingResponse(no_key(), media_type="text/event-stream")
 
     sessions = MOCK_SESSIONS[req.pid]
     pt = _build_response(req.pid, sessions, len(sessions)-1)
     system = _system_prompt(pt)
 
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}")
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        + GEMINI_MODEL
+        + ":streamGenerateContent?alt=sse&key="
+        + GEMINI_API_KEY
+    )
 
     gemini_messages = []
     for m in req.messages:
@@ -414,42 +417,42 @@ async def chat(req: ChatRequest):
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream("POST", url, json=payload) as resp:
                     async for line in resp.aiter_lines():
-                        if line.startswith("data: "):
-                            raw = line[6:].strip()
-                            if not raw or raw == "[DONE]":
-                                continue
-                            try:
-                                obj = json.loads(raw)
-                                text = (obj.get("candidates", [{}])[0]
-                                           .get("content", {})
-                                           .get("parts", [{}])[0]
-                                           .get("text", ""))
-                                if text:
-                                    chunk = json.dumps({"message": {"content": text}, "done": False})
-                                    yield f"data: {chunk}
-
-"
-                            except (json.JSONDecodeError, IndexError, KeyError):
-                                continue
-            yield f"data: {json.dumps({'done': True})}
-
-"
+                        if not line.startswith("data: "):
+                            continue
+                        raw = line[6:].strip()
+                        if not raw or raw == "[DONE]":
+                            continue
+                        try:
+                            obj = json.loads(raw)
+                            text = (
+                                obj.get("candidates", [{}])[0]
+                                   .get("content", {})
+                                   .get("parts", [{}])[0]
+                                   .get("text", "")
+                            )
+                            if text:
+                                chunk = json.dumps({"message": {"content": text}, "done": False})
+                                yield "data: " + chunk + "\n\n"
+                        except (json.JSONDecodeError, IndexError, KeyError):
+                            continue
+            done_msg = json.dumps({"done": True})
+            yield "data: " + done_msg + "\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}
-
-"
+            err_msg = json.dumps({"error": str(e)})
+            yield "data: " + err_msg + "\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
 
 @app.get("/api/status")
 def status():
     return {
-        "mode":        "mock",
-        "n_patients":  len(MOCK_SESSIONS),
-        "n_sessions":  sum(len(v) for v in MOCK_SESSIONS.values()),
+        "mode":         "mock",
+        "n_patients":   len(MOCK_SESSIONS),
+        "n_sessions":   sum(len(v) for v in MOCK_SESSIONS.values()),
         "chat_enabled": bool(GEMINI_API_KEY),
-        "model":       GEMINI_MODEL,
-        "note":        "Synthetic data only. No real patient records.",
+        "model":        GEMINI_MODEL,
+        "note":         "Synthetic data only. No real patient records.",
     }
 
 
