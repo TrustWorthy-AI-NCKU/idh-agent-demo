@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Data (never commit real patient data)
+*.jsonl
+*.pkl
+*.pt
+*.joblib
+*.csv
+data/
+
+# Env
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
