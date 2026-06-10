@@ -5,7 +5,7 @@ services:
     buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build && cd ..
     startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: ANTHROPIC_API_KEY
+      - key: GEMINI_API_KEY
         sync: false
-      - key: CLAUDE_MODEL
-        value: claude-sonnet-4-5
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash

@@ -1,5 +1,5 @@
 """
-IDH Agent Demo - FastAPI backend (mock data, Claude API chat)
+IDH Agent Demo - FastAPI backend (mock data, Gemini API chat)
 
 All patient data is synthetic. No real clinical records included.
 
@@ -7,9 +7,9 @@ Usage:
     pip install -r requirements.txt
     uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
-Set ANTHROPIC_API_KEY to enable chat:
-    Windows:  set ANTHROPIC_API_KEY=sk-ant-...
-    Linux:    export ANTHROPIC_API_KEY=sk-ant-...
+Set GEMINI_API_KEY to enable chat:
+    Windows:  set GEMINI_API_KEY=AIza...
+    Linux:    export GEMINI_API_KEY=AIza...
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import math
 import os
 from pathlib import Path
 
-import anthropic
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -26,8 +26,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ---------- config -----------------------------------------------------------
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL      = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
 VETTED_INTERVENTIONS = [
     "降低超過濾率或延長透析時間 (reduce UF rate / extend HD time)",
@@ -384,30 +384,60 @@ class ChatRequest(BaseModel):
 async def chat(req: ChatRequest):
     if req.pid not in MOCK_SESSIONS:
         raise HTTPException(404, f"Patient {req.pid} not found")
-    if not ANTHROPIC_API_KEY:
+    if not GEMINI_API_KEY:
         async def no_key():
-            yield f"data: {json.dumps({'error': 'ANTHROPIC_API_KEY not set. Please configure the environment variable.'})}\n\n"
+            yield f"data: {json.dumps({'error': 'GEMINI_API_KEY not set.'})}
+
+"
         return StreamingResponse(no_key(), media_type="text/event-stream")
 
     sessions = MOCK_SESSIONS[req.pid]
     pt = _build_response(req.pid, sessions, len(sessions)-1)
     system = _system_prompt(pt)
 
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}")
+
+    gemini_messages = []
+    for m in req.messages:
+        role = "user" if m["role"] == "user" else "model"
+        gemini_messages.append({"role": role, "parts": [{"text": m["content"]}]})
+
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": gemini_messages,
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 1024},
+    }
+
     async def generate():
         try:
-            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            with client.messages.stream(
-                model=CLAUDE_MODEL,
-                max_tokens=1024,
-                system=system,
-                messages=req.messages,
-            ) as stream:
-                for text in stream.text_stream:
-                    chunk = json.dumps({"message": {"content": text}, "done": False})
-                    yield f"data: {chunk}\n\n"
-            yield f"data: {json.dumps({'done': True})}\n\n"
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream("POST", url, json=payload) as resp:
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: "):
+                            raw = line[6:].strip()
+                            if not raw or raw == "[DONE]":
+                                continue
+                            try:
+                                obj = json.loads(raw)
+                                text = (obj.get("candidates", [{}])[0]
+                                           .get("content", {})
+                                           .get("parts", [{}])[0]
+                                           .get("text", ""))
+                                if text:
+                                    chunk = json.dumps({"message": {"content": text}, "done": False})
+                                    yield f"data: {chunk}
+
+"
+                            except (json.JSONDecodeError, IndexError, KeyError):
+                                continue
+            yield f"data: {json.dumps({'done': True})}
+
+"
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error': str(e)})}
+
+"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -417,10 +447,11 @@ def status():
         "mode":        "mock",
         "n_patients":  len(MOCK_SESSIONS),
         "n_sessions":  sum(len(v) for v in MOCK_SESSIONS.values()),
-        "chat_enabled": bool(ANTHROPIC_API_KEY),
-        "model":       CLAUDE_MODEL,
+        "chat_enabled": bool(GEMINI_API_KEY),
+        "model":       GEMINI_MODEL,
         "note":        "Synthetic data only. No real patient records.",
     }
+
 
 # ---------- serve frontend ---------------------------------------------------
 _static = Path(__file__).parent.parent / "frontend" / "dist"
