@@ -394,10 +394,11 @@ async def chat(req: ChatRequest):
     pt = _build_response(req.pid, sessions, len(sessions)-1)
     system = _system_prompt(pt)
 
+    # Gemini non-streaming endpoint (more reliable than SSE for parsing)
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         + GEMINI_MODEL
-        + ":streamGenerateContent?alt=sse&key="
+        + ":generateContent?key="
         + GEMINI_API_KEY
     )
 
@@ -405,6 +406,10 @@ async def chat(req: ChatRequest):
     for m in req.messages:
         role = "user" if m["role"] == "user" else "model"
         gemini_messages.append({"role": role, "parts": [{"text": m["content"]}]})
+
+    # Ensure conversation starts with user role
+    if not gemini_messages or gemini_messages[0]["role"] != "user":
+        gemini_messages.insert(0, {"role": "user", "parts": [{"text": "Hello"}]})
 
     payload = {
         "system_instruction": {"parts": [{"text": system}]},
@@ -415,28 +420,40 @@ async def chat(req: ChatRequest):
     async def generate():
         try:
             async with httpx.AsyncClient(timeout=120) as client:
-                async with client.stream("POST", url, json=payload) as resp:
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        raw = line[6:].strip()
-                        if not raw or raw == "[DONE]":
-                            continue
-                        try:
-                            obj = json.loads(raw)
-                            text = (
-                                obj.get("candidates", [{}])[0]
-                                   .get("content", {})
-                                   .get("parts", [{}])[0]
-                                   .get("text", "")
-                            )
-                            if text:
-                                chunk = json.dumps({"message": {"content": text}, "done": False})
-                                yield "data: " + chunk + "\n\n"
-                        except (json.JSONDecodeError, IndexError, KeyError):
-                            continue
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+
+                # Extract text from Gemini response
+                text = (
+                    data.get("candidates", [{}])[0]
+                        .get("content", {})
+                        .get("parts", [{}])[0]
+                        .get("text", "")
+                )
+
+                if not text:
+                    # Log full response for debugging
+                    err = json.dumps({"error": "Empty response from Gemini: " + json.dumps(data)[:200]})
+                    yield "data: " + err + "\n\n"
+                    return
+
+                # Simulate streaming by yielding chunks
+                words = text.split(" ")
+                chunk_size = 5
+                for i in range(0, len(words), chunk_size):
+                    chunk_text = " ".join(words[i:i+chunk_size])
+                    if i + chunk_size < len(words):
+                        chunk_text += " "
+                    chunk = json.dumps({"message": {"content": chunk_text}, "done": False})
+                    yield "data: " + chunk + "\n\n"
+
             done_msg = json.dumps({"done": True})
             yield "data: " + done_msg + "\n\n"
+
+        except httpx.HTTPStatusError as e:
+            err_msg = json.dumps({"error": "Gemini API error: " + str(e.response.text)[:300]})
+            yield "data: " + err_msg + "\n\n"
         except Exception as e:
             err_msg = json.dumps({"error": str(e)})
             yield "data: " + err_msg + "\n\n"
